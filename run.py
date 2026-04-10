@@ -22,7 +22,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(log_dir / 'bot.log')
+        logging.FileHandler(log_dir / 'bot.txt')
     ]
 )
 logger = logging.getLogger('elix_bot')

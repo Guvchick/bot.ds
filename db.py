@@ -1,198 +1,191 @@
 """
-Утилиты для работы с базой данных (PostgreSQL) бота Elix
+HTTP-клиент для Go DB-сервиса бота Elix.
+Все операции с БД выполняются через REST API Go-микросервиса.
 """
-import asyncpg
-import os
+import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger('db_utils')
+import aiohttp
 
-_pool: Optional[asyncpg.Pool] = None
+logger = logging.getLogger("db_client")
 
-
-async def get_pool() -> asyncpg.Pool:
-    global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(
-            host=os.getenv("POSTGRES_HOST", "db"),
-            port=int(os.getenv("POSTGRES_PORT", "5432")),
-            database=os.getenv("POSTGRES_DB", "elixbot"),
-            user=os.getenv("POSTGRES_USER", "elixbot"),
-            password=os.getenv("POSTGRES_PASSWORD", "changeme"),
-            min_size=2,
-            max_size=10,
-        )
-    return _pool
+_BASE = os.getenv("DB_SERVICE_URL", "http://db-service:8080")
+_session: Optional[aiohttp.ClientSession] = None
 
 
-async def init_db() -> bool:
-    """Создаёт таблицы если не существуют"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                guild_id TEXT NOT NULL,
-                key      TEXT NOT NULL,
-                value    TEXT,
-                PRIMARY KEY (guild_id, key)
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS module_settings (
-                guild_id      TEXT NOT NULL,
-                module_name   TEXT NOT NULL,
-                setting_name  TEXT NOT NULL,
-                setting_value TEXT,
-                PRIMARY KEY (guild_id, module_name, setting_name)
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id    TEXT   NOT NULL,
-                guild_id   TEXT   NOT NULL,
-                xp         BIGINT DEFAULT 0,
-                level      INT    DEFAULT 0,
-                messages   INT    DEFAULT 0,
-                voice_time BIGINT DEFAULT 0,
-                PRIMARY KEY (user_id, guild_id)
-            )
-        """)
-    logger.info("База данных инициализирована")
-    return True
+async def _sess() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
 
 
 def _encode(value: Any) -> str:
-    if isinstance(value, (str, int, float, bool)):
-        return str(value)
+    """Кодирует Python-значение в строку для хранения."""
+    if isinstance(value, str):
+        return value
     return json.dumps(value, ensure_ascii=False)
 
 
 def _decode(raw: str) -> Any:
+    """Декодирует строку из БД обратно в Python-тип."""
     try:
         return json.loads(raw)
     except Exception:
         return raw
 
 
-async def get_setting(guild_id: str, key: str, default=None) -> Any:
+# ── settings ──────────────────────────────────────────────────────────────────
+
+async def get_setting(guild_id, key: str, default=None) -> Any:
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT value FROM settings WHERE guild_id = $1 AND key = $2",
-                str(guild_id), key,
-            )
-            if row:
-                return _decode(row["value"])
-            return default
+        s = await _sess()
+        async with s.get(f"{_BASE}/settings/{guild_id}/{key}") as r:
+            if r.status == 404:
+                return default
+            if r.status != 200:
+                return default
+            data = await r.json()
+            return _decode(data["value"])
     except Exception as e:
-        logger.error(f"Ошибка получения настройки {key}: {e}")
+        logger.error(f"get_setting [{key}]: {e}")
         return default
 
 
-async def set_setting(guild_id: str, key: str, value: Any) -> bool:
+async def set_setting(guild_id, key: str, value: Any) -> bool:
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO settings (guild_id, key, value)
-                   VALUES ($1, $2, $3)
-                   ON CONFLICT (guild_id, key) DO UPDATE SET value = EXCLUDED.value""",
-                str(guild_id), key, _encode(value),
-            )
-        return True
+        s = await _sess()
+        async with s.put(
+            f"{_BASE}/settings/{guild_id}/{key}",
+            json={"value": _encode(value)},
+        ) as r:
+            return r.status == 200
     except Exception as e:
-        logger.error(f"Ошибка установки настройки {key}: {e}")
+        logger.error(f"set_setting [{key}]: {e}")
         return False
 
 
-async def delete_setting(guild_id: str, key: str) -> bool:
+async def delete_setting(guild_id, key: str) -> bool:
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM settings WHERE guild_id = $1 AND key = $2",
-                str(guild_id), key,
-            )
-        return True
+        s = await _sess()
+        async with s.delete(f"{_BASE}/settings/{guild_id}/{key}") as r:
+            return r.status == 200
     except Exception as e:
-        logger.error(f"Ошибка удаления настройки {key}: {e}")
+        logger.error(f"delete_setting [{key}]: {e}")
         return False
 
 
-async def get_all_settings(guild_id: str) -> Dict[str, Any]:
-    result = {}
+async def get_all_settings(guild_id) -> Dict[str, Any]:
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT key, value FROM settings WHERE guild_id = $1",
-                str(guild_id),
-            )
-            for row in rows:
-                result[row["key"]] = _decode(row["value"])
+        s = await _sess()
+        async with s.get(f"{_BASE}/settings/{guild_id}") as r:
+            if r.status != 200:
+                return {}
+            raw: dict = await r.json()
+            return {k: _decode(v) for k, v in raw.items()}
     except Exception as e:
-        logger.error(f"Ошибка получения всех настроек гильдии {guild_id}: {e}")
-    return result
+        logger.error(f"get_all_settings: {e}")
+        return {}
 
 
-async def get_module_setting(
-    guild_id: str, module_name: str, setting_name: str, default=None
-) -> Any:
+# ── users ─────────────────────────────────────────────────────────────────────
+
+async def get_user(user_id, guild_id) -> Optional[Dict[str, Any]]:
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """SELECT setting_value FROM module_settings
-                   WHERE guild_id = $1 AND module_name = $2 AND setting_name = $3""",
-                str(guild_id), module_name, setting_name,
-            )
-            if row:
-                return _decode(row["setting_value"])
-            return default
+        s = await _sess()
+        async with s.get(f"{_BASE}/users/{guild_id}/{user_id}") as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+            data["next_level_xp"] = 300 * (data["level"] + 1)
+            return data
     except Exception as e:
-        logger.error(f"Ошибка получения настройки модуля {module_name}.{setting_name}: {e}")
-        return default
+        logger.error(f"get_user: {e}")
+        return None
 
 
-async def set_module_setting(
-    guild_id: str, module_name: str, setting_name: str, value: Any
-) -> bool:
+async def add_xp(user_id, guild_id, amount: int) -> Dict[str, Any]:
+    """Добавляет XP. Возвращает {"level": N, "level_up": bool}."""
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO module_settings (guild_id, module_name, setting_name, setting_value)
-                   VALUES ($1, $2, $3, $4)
-                   ON CONFLICT (guild_id, module_name, setting_name)
-                   DO UPDATE SET setting_value = EXCLUDED.setting_value""",
-                str(guild_id), module_name, setting_name, _encode(value),
-            )
-        return True
+        s = await _sess()
+        async with s.post(
+            f"{_BASE}/users/{guild_id}/{user_id}/xp",
+            json={"amount": amount},
+        ) as r:
+            if r.status == 200:
+                return await r.json()
     except Exception as e:
-        logger.error(f"Ошибка установки настройки модуля {module_name}.{setting_name}: {e}")
-        return False
+        logger.error(f"add_xp: {e}")
+    return {"level": 0, "level_up": False}
 
 
-async def get_all_module_settings(guild_id: str, module_name: str) -> Dict[str, Any]:
-    result = {}
+async def incr_messages(user_id, guild_id) -> None:
     try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT setting_name, setting_value FROM module_settings
-                   WHERE guild_id = $1 AND module_name = $2""",
-                str(guild_id), module_name,
-            )
-            for row in rows:
-                result[row["setting_name"]] = _decode(row["setting_value"])
+        s = await _sess()
+        async with s.post(f"{_BASE}/users/{guild_id}/{user_id}/messages"):
+            pass
     except Exception as e:
-        logger.error(f"Ошибка получения настроек модуля {module_name}: {e}")
-    return result
+        logger.error(f"incr_messages: {e}")
+
+
+async def add_voice_time(user_id, guild_id, seconds: int) -> None:
+    try:
+        s = await _sess()
+        async with s.post(
+            f"{_BASE}/users/{guild_id}/{user_id}/voice",
+            json={"seconds": seconds},
+        ):
+            pass
+    except Exception as e:
+        logger.error(f"add_voice_time: {e}")
+
+
+async def get_leaderboard(guild_id, limit: int = 10) -> List[Dict[str, Any]]:
+    try:
+        s = await _sess()
+        async with s.get(
+            f"{_BASE}/leaderboard/{guild_id}",
+            params={"limit": limit},
+        ) as r:
+            if r.status == 200:
+                return await r.json()
+    except Exception as e:
+        logger.error(f"get_leaderboard: {e}")
+    return []
+
+
+async def trigger_backup() -> bool:
+    try:
+        s = await _sess()
+        async with s.post(f"{_BASE}/backup") as r:
+            return r.status in (200, 202)
+    except Exception as e:
+        logger.error(f"trigger_backup: {e}")
+    return False
+
+
+# ── lifecycle ─────────────────────────────────────────────────────────────────
+
+async def init_db() -> bool:
+    """Ожидает доступности Go DB-сервиса."""
+    timeout = aiohttp.ClientTimeout(total=3)
+    for attempt in range(15):
+        try:
+            s = await _sess()
+            async with s.get(f"{_BASE}/health", timeout=timeout) as r:
+                if r.status == 200:
+                    logger.info("Go DB-сервис доступен")
+                    return True
+        except Exception:
+            pass
+        logger.warning(f"Go DB-сервис недоступен, попытка {attempt + 1}/15...")
+        await asyncio.sleep(3)
+    raise RuntimeError("Go DB-сервис не ответил после 15 попыток")
 
 
 async def migrate_data():
-    """Нет данных для миграции — БД на PostgreSQL с нуля."""
+    """Заглушка для совместимости — таблицы создаёт Go-сервис."""
     pass

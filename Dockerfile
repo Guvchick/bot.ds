@@ -1,11 +1,8 @@
 FROM python:3.11-slim
 
-# Системные зависимости: FFmpeg, libsodium (PyNaCl), libpq (asyncpg)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsodium-dev \
-    libpq-dev \
-    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

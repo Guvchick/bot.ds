@@ -1,22 +1,12 @@
 services:
-  bot:
-    build: .
-    restart: unless-stopped
-    env_file: .env
-    depends_on:
-      db:
-        condition: service_healthy
-    volumes:
-      - bot_logs:/app/logs
-    networks:
-      - ElixDsBot
 
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
   db:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-elixbot}
-      POSTGRES_USER: ${POSTGRES_USER:-elixbot}
+      POSTGRES_DB:       ${POSTGRES_DB:-elixbot}
+      POSTGRES_USER:     ${POSTGRES_USER:-elixbot}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - pg_data:/var/lib/postgresql/data
@@ -28,10 +18,44 @@ services:
     networks:
       - ElixDsBot
 
+  # ── Go DB-сервис ──────────────────────────────────────────────────────────────
+  db-service:
+    build: ./db-service
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - db_service_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - ElixDsBot
+
+  # ── Python Discord-бот ────────────────────────────────────────────────────────
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_SERVICE_URL: http://db-service:8080
+    depends_on:
+      db-service:
+        condition: service_healthy
+    volumes:
+      - bot_logs:/app/logs
+    networks:
+      - ElixDsBot
+
 networks:
   ElixDsBot:
     driver: bridge
 
 volumes:
-  bot_logs:
   pg_data:
+  db_service_logs:
+  bot_logs:
