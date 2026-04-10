@@ -1,21 +1,20 @@
 FROM python:3.11-slim
 
-# Устанавливаем FFmpeg и системные зависимости
+# Системные зависимости: FFmpeg, libsodium (PyNaCl), libpq (asyncpg)
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsodium-dev \
+    libpq-dev \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Устанавливаем зависимости Python
 COPY requirement.txt .
 RUN pip install --no-cache-dir -r requirement.txt
 
-# Копируем код бота
 COPY . .
 
-# Создаём директории для данных и логов
-RUN mkdir -p data logs
+RUN mkdir -p logs
 
 CMD ["python", "run.py"]

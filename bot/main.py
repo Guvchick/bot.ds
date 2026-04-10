@@ -16,7 +16,6 @@ logger = logging.getLogger('elix_bot')
 
 async def start_bot():
     """Инициализирует и запускает бота"""
-    # Инициализируем базу данных
     await init_db()
     await migrate_data()
 
@@ -24,24 +23,28 @@ async def start_bot():
     if not token:
         raise RuntimeError("Переменная окружения DISCORD_TOKEN не задана")
 
-    prefix = os.getenv("PREFIX", "!")
-
     intents = discord.Intents.default()
     intents.message_content = True
     intents.members = True
     intents.voice_states = True
+    intents.moderation = True
 
-    bot = commands.Bot(command_prefix=prefix, intents=intents)
+    # command_prefix нужен для commands.Bot, но все команды у нас слеш
+    bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
     @bot.event
     async def on_ready():
         logger.info(f"Бот запущен как {bot.user} (ID: {bot.user.id})")
+        try:
+            synced = await bot.tree.sync()
+            logger.info(f"Синхронизировано {len(synced)} слеш-команд")
+        except Exception as e:
+            logger.error(f"Ошибка синхронизации команд: {e}")
 
     await bot.add_cog(RankSystemCog(bot))
     await bot.add_cog(LoggingCog(bot))
     await bot.add_cog(DashboardCog(bot))
 
-    # Музыкальный ког требует youtube_dl / yt-dlp — добавляем если доступен
     try:
         from music_cog import MusicCog
         await bot.add_cog(MusicCog(bot))

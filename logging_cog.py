@@ -1,214 +1,263 @@
 """
-Ког для системы логирования в боте Elix
+Ког для логирования событий сервера в боте Elix
 """
-import discord
-from discord.ext import commands
 import asyncio
 import datetime
-import io
-import json
-from typing import Dict, Any, List, Optional, Union
-import traceback
+from typing import Optional
+
+import discord
+from discord.ext import commands
+
+from db import get_setting
+
 
 class LoggingCog(commands.Cog):
-    """Ког для логирования событий сервера"""
-    
     def __init__(self, bot, module=None):
         self.bot = bot
-        self.module = module
-        
-        # Используем кэш из модуля, если он доступен
-        self.message_cache = {}
-        self.deleted_messages = set()
-        self.voice_time_cache = {}
-        
-        if self.module:
-            self.message_cache = self.module.message_cache
-            self.deleted_messages = self.module.deleted_messages
-            self.voice_time_cache = self.module.voice_time_cache
-    
+        # Отслеживаем недавно забаненных, чтобы on_member_remove не логировал их как кик
+        self._recent_bans: set = set()
+
+    # ── вспомогательные ────────────────────────────────────────────────────────
+
+    async def _log_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
+        channel_id = await get_setting(str(guild.id), "mod_log_channel")
+        if not channel_id:
+            return None
+        try:
+            return guild.get_channel(int(channel_id))
+        except (ValueError, TypeError):
+            return None
+
+    async def _send(self, guild: discord.Guild, embed: discord.Embed) -> None:
+        ch = await self._log_channel(guild)
+        if ch:
+            try:
+                await ch.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+    # ── сообщения ──────────────────────────────────────────────────────────────
+
     @commands.Cog.listener()
-    async def on_message(self, message):
-        """Обработчик новых сообщений"""
-        # Проверяем, включен ли модуль
-        if self.module and not self.module.enabled:
+    async def on_message_delete(self, message: discord.Message):
+        if message.author.bot or not message.guild:
             return
-        
-        # Игнорируем сообщения от ботов (опционально)
-        if message.author.bot and message.author.id != self.bot.user.id:
-            return
-        
-        # Игнорируем личные сообщения
-        if not message.guild:
-            return
-        
-        # Проверяем, включена ли категория логирования сообщений
-        if self.module and not self.module.is_category_enabled("messages"):
-            return
-        
-        # Кэшируем сообщение для отслеживания изменений
-        if self.module:
-            self.module.cache_message(message)
-    
-    @commands.Cog.listener()
-    async def on_message_delete(self, message):
-        """Обработчик удаленных сообщений"""
-        # Проверяем, включен ли модуль
-        if self.module and not self.module.enabled:
-            return
-        
-        # Игнорируем сообщения от ботов (опционально)
-        if message.author.bot and message.author.id != self.bot.user.id:
-            return
-        
-        # Игнорируем личные сообщения
-        if not message.guild:
-            return
-        
-        # Проверяем, включена ли категория логирования сообщений
-        if self.module and not self.module.is_category_enabled("messages"):
-            return
-        
-        # Проверяем, было ли сообщение удалено из-за фильтра
-        was_filtered = False
-        if self.module:
-            was_filtered = self.module.was_deleted_by_filter(message.id)
-        
-        # Создаем эмбед для лога
+
         embed = discord.Embed(
             title="🗑️ Сообщение удалено",
             description=f"**Канал:** {message.channel.mention}\n**Автор:** {message.author.mention}",
             color=discord.Color.red(),
-            timestamp=datetime.datetime.utcnow()
+            timestamp=discord.utils.utcnow(),
         )
-        
-        # Добавляем контент сообщения, если он есть
         if message.content:
-            if len(message.content) > 1024:
-                embed.add_field(name="Содержимое", value=message.content[:1021] + "...", inline=False)
-            else:
-                embed.add_field(name="Содержимое", value=message.content, inline=False)
-        
-        # Добавляем информацию о вложениях
+            embed.add_field(
+                name="Содержимое",
+                value=message.content[:1024],
+                inline=False,
+            )
         if message.attachments:
-            files_info = "\n".join([f"📎 `{attachment.filename}` ({attachment.size} байт)" for attachment in message.attachments])
-            embed.add_field(name="Вложения", value=files_info, inline=False)
-        
-        # Добавляем информацию о причине удаления
-        if was_filtered:
-            embed.add_field(name="Причина удаления", value="Автоматическая фильтрация запрещенных слов", inline=False)
-            embed.color = discord.Color.orange()
-        
-        # Устанавливаем автора эмбеда как автора сообщения
-        embed.set_author(name=f"{message.author} ({message.author.id})", icon_url=message.author.display_avatar.url)
-        
-        # Отправляем лог
-        if self.module:
-            await self.module.log_to_channel(embed=embed)
-    
+            embed.add_field(
+                name="Вложения",
+                value="\n".join(f"📎 `{a.filename}` ({a.size} байт)" for a in message.attachments),
+                inline=False,
+            )
+        embed.set_author(
+            name=f"{message.author} ({message.author.id})",
+            icon_url=message.author.display_avatar.url,
+        )
+        await self._send(message.guild, embed)
+
     @commands.Cog.listener()
-    async def on_message_edit(self, before, after):
-        """Обработчик измененных сообщений"""
-        # Проверяем, включен ли модуль
-        if self.module and not self.module.enabled:
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        if before.author.bot or not before.guild:
             return
-        
-        # Игнорируем сообщения от ботов (опционально)
-        if before.author.bot and before.author.id != self.bot.user.id:
-            return
-        
-        # Игнорируем личные сообщения
-        if not before.guild:
-            return
-        
-        # Проверяем, включена ли категория логирования сообщений
-        if self.module and not self.module.is_category_enabled("messages"):
-            return
-        
-        # Игнорируем, если содержимое не изменилось (например, встраивания загрузились)
         if before.content == after.content:
             return
-        
-        # Создаем эмбед для лога
+
         embed = discord.Embed(
             title="✏️ Сообщение изменено",
-            description=f"**Канал:** {before.channel.mention}\n**Автор:** {before.author.mention}\n**[Перейти к сообщению]({after.jump_url})**",
+            description=(
+                f"**Канал:** {before.channel.mention}\n"
+                f"**Автор:** {before.author.mention}\n"
+                f"**[Перейти к сообщению]({after.jump_url})**"
+            ),
             color=discord.Color.blue(),
-            timestamp=datetime.datetime.utcnow()
+            timestamp=discord.utils.utcnow(),
         )
-        
-        # Добавляем старое содержимое
-        if before.content:
-            if len(before.content) > 1024:
-                embed.add_field(name="До", value=before.content[:1021] + "...", inline=False)
-            else:
-                embed.add_field(name="До", value=before.content, inline=False)
-        else:
-            embed.add_field(name="До", value="*Нет содержимого*", inline=False)
-        
-        # Добавляем новое содержимое
-        if after.content:
-            if len(after.content) > 1024:
-                embed.add_field(name="После", value=after.content[:1021] + "...", inline=False)
-            else:
-                embed.add_field(name="После", value=after.content, inline=False)
-        else:
-            embed.add_field(name="После", value="*Нет содержимого*", inline=False)
-        
-        # Устанавливаем автора эмбеда как автора сообщения
-        embed.set_author(name=f"{before.author} ({before.author.id})", icon_url=before.author.display_avatar.url)
-        
-        # Отправляем лог
-        if self.module:
-            await self.module.log_to_channel(embed=embed)
-    
+        embed.add_field(name="До",    value=before.content[:1024] or "*пусто*", inline=False)
+        embed.add_field(name="После", value=after.content[:1024]  or "*пусто*", inline=False)
+        embed.set_author(
+            name=f"{before.author} ({before.author.id})",
+            icon_url=before.author.display_avatar.url,
+        )
+        await self._send(before.guild, embed)
+
+    # ── голосовые каналы ───────────────────────────────────────────────────────
+
     @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-        """Обработчик изменений состояния голосовых каналов"""
-        # Проверяем, включен ли модуль
-        if self.module and not self.module.enabled:
-            return
-        
-        # Игнорируем ботов (опционально)
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
         if member.bot:
             return
-        
-        # Проверяем, включена ли категория логирования голосовых каналов
-        if self.module and not self.module.is_category_enabled("voice"):
-            return
-        
-        # Пользователь присоединился к голосовому каналу
+
         if before.channel is None and after.channel is not None:
             embed = discord.Embed(
                 title="🔊 Вход в голосовой канал",
                 description=f"{member.mention} подключился к **{after.channel.name}**",
                 color=discord.Color.green(),
-                timestamp=datetime.datetime.utcnow()
+                timestamp=discord.utils.utcnow(),
             )
-            embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
-            if self.module:
-                await self.module.log_to_channel(embed=embed)
-
-        # Пользователь вышел из голосового канала
         elif before.channel is not None and after.channel is None:
             embed = discord.Embed(
                 title="🔇 Выход из голосового канала",
                 description=f"{member.mention} отключился от **{before.channel.name}**",
                 color=discord.Color.red(),
-                timestamp=datetime.datetime.utcnow()
+                timestamp=discord.utils.utcnow(),
             )
-            embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
-            if self.module:
-                await self.module.log_to_channel(embed=embed)
-
-        # Пользователь сменил голосовой канал
         elif before.channel != after.channel:
             embed = discord.Embed(
                 title="🔄 Смена голосового канала",
-                description=f"{member.mention} перешёл из **{before.channel.name}** в **{after.channel.name}**",
+                description=(
+                    f"{member.mention} перешёл из **{before.channel.name}** → **{after.channel.name}**"
+                ),
                 color=discord.Color.blue(),
-                timestamp=datetime.datetime.utcnow()
+                timestamp=discord.utils.utcnow(),
             )
-            embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
-            if self.module:
-                await self.module.log_to_channel(embed=embed)
+        else:
+            return  # Мьют/анмьют в войсе — не логируем
+
+        embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
+        await self._send(member.guild, embed)
+
+    # ── бан ────────────────────────────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User):
+        self._recent_bans.add(user.id)
+
+        embed = discord.Embed(
+            title="🔨 Участник забанен",
+            color=discord.Color.red(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_author(name=f"{user} ({user.id})", icon_url=user.display_avatar.url)
+
+        if guild.me.guild_permissions.view_audit_log:
+            try:
+                await asyncio.sleep(0.5)
+                async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.ban):
+                    if entry.target.id == user.id:
+                        embed.add_field(name="Модератор", value=entry.user.mention, inline=True)
+                        if entry.reason:
+                            embed.add_field(name="Причина", value=entry.reason, inline=False)
+                        break
+            except discord.Forbidden:
+                pass
+
+        await self._send(guild, embed)
+
+        await asyncio.sleep(5)
+        self._recent_bans.discard(user.id)
+
+    @commands.Cog.listener()
+    async def on_member_unban(self, guild: discord.Guild, user: discord.User):
+        embed = discord.Embed(
+            title="✅ Бан снят",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_author(name=f"{user} ({user.id})", icon_url=user.display_avatar.url)
+
+        if guild.me.guild_permissions.view_audit_log:
+            try:
+                await asyncio.sleep(0.5)
+                async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.unban):
+                    if entry.target.id == user.id:
+                        embed.add_field(name="Модератор", value=entry.user.mention, inline=True)
+                        break
+            except discord.Forbidden:
+                pass
+
+        await self._send(guild, embed)
+
+    # ── кик ────────────────────────────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        # Ждём, пока аудит-лог обновится, и пока on_member_ban пометит бан
+        await asyncio.sleep(1)
+
+        if member.id in self._recent_bans:
+            return  # Это бан, уже залогировали выше
+
+        if not member.guild.me.guild_permissions.view_audit_log:
+            return
+
+        try:
+            async for entry in member.guild.audit_logs(
+                limit=5,
+                action=discord.AuditLogAction.kick,
+                after=datetime.datetime.utcnow() - datetime.timedelta(seconds=10),
+            ):
+                if entry.target.id == member.id:
+                    embed = discord.Embed(
+                        title="👢 Участник кикнут",
+                        color=discord.Color.orange(),
+                        timestamp=discord.utils.utcnow(),
+                    )
+                    embed.set_author(
+                        name=f"{member} ({member.id})",
+                        icon_url=member.display_avatar.url,
+                    )
+                    embed.add_field(name="Модератор", value=entry.user.mention, inline=True)
+                    if entry.reason:
+                        embed.add_field(name="Причина", value=entry.reason, inline=False)
+                    await self._send(member.guild, embed)
+                    return
+        except discord.Forbidden:
+            pass
+
+    # ── мьют (тайм-аут) ────────────────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if before.timed_out_until == after.timed_out_until:
+            return
+
+        if after.timed_out_until is not None:
+            until_ts = int(after.timed_out_until.timestamp())
+            embed = discord.Embed(
+                title="🔇 Участник замьючен",
+                description=f"{after.mention} получил тайм-аут до <t:{until_ts}:F>",
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow(),
+            )
+        else:
+            embed = discord.Embed(
+                title="🔊 Мьют снят",
+                description=f"С {after.mention} снят тайм-аут",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow(),
+            )
+
+        embed.set_author(name=f"{after} ({after.id})", icon_url=after.display_avatar.url)
+
+        if after.guild.me.guild_permissions.view_audit_log:
+            try:
+                await asyncio.sleep(0.5)
+                async for entry in after.guild.audit_logs(
+                    limit=5, action=discord.AuditLogAction.member_update
+                ):
+                    if entry.target.id == after.id:
+                        embed.add_field(name="Модератор", value=entry.user.mention, inline=True)
+                        if entry.reason:
+                            embed.add_field(name="Причина", value=entry.reason, inline=False)
+                        break
+            except discord.Forbidden:
+                pass
+
+        await self._send(after.guild, embed)
