@@ -416,6 +416,39 @@ class DashboardCog(commands.Cog):
             
             await ctx.send(f"✅ Настройка `{setting}` изменена на `{value}`.")
     
+    @commands.command(name="invite")
+    async def invite(self, ctx):
+        """Отправляет ссылку для добавления бота на сервер"""
+        permissions = discord.Permissions(
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            attach_files=True,
+            read_message_history=True,
+            add_reactions=True,
+            manage_messages=True,
+            kick_members=True,
+            ban_members=True,
+            connect=True,
+            speak=True,
+            manage_roles=True,
+        )
+
+        invite_url = discord.utils.oauth_url(
+            ctx.bot.user.id,
+            permissions=permissions,
+            scopes=("bot", "applications.commands"),
+        )
+
+        embed = discord.Embed(
+            title="Добавить бота на сервер",
+            description=f"[Нажмите здесь, чтобы пригласить бота]({invite_url})",
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Для добавления бота требуются права администратора на целевом сервере.")
+
+        await ctx.send(embed=embed)
+
     @kick.error
     @ban.error
     @clear.error
