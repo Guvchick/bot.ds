@@ -206,13 +206,43 @@ class MusicCog(commands.Cog):
             return None
     
     @commands.command(name='play', aliases=['p'])
-    async def play(self, ctx, *, search: str):
+    async def play(self, ctx, *, search: str = None):
         """Добавляет трек в очередь"""
+        # Если аргумент не указан — показываем подсказку по платформам
+        if not search:
+            embed = discord.Embed(
+                title="🎵 Как использовать !play",
+                description="Укажите название трека или ссылку:\n`!play <название или ссылка>`",
+                color=discord.Color.blue(),
+            )
+            embed.add_field(
+                name="Поддерживаемые платформы",
+                value=(
+                    "**YouTube** — ссылка или название\n"
+                    "**Spotify** — ссылка на трек/плейлист\n"
+                    "**SoundCloud** — ссылка на трек\n"
+                    "**VK** — ссылка на аудио"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Примеры",
+                value=(
+                    "`!play Never Gonna Give You Up`\n"
+                    "`!play https://www.youtube.com/watch?v=...`\n"
+                    "`!play https://open.spotify.com/track/...`\n"
+                    "`!play https://soundcloud.com/...`"
+                ),
+                inline=False,
+            )
+            await ctx.send(embed=embed)
+            return
+
         # Проверяем, включен ли модуль
         if self.module and not self.module.enabled:
             await ctx.send("❌ Музыкальный модуль отключен.")
             return
-        
+
         # Проверяем, подключен ли автор к голосовому каналу
         if not ctx.author.voice:
             await ctx.send("❌ Вы должны быть подключены к голосовому каналу.")

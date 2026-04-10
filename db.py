@@ -172,6 +172,25 @@ async def get_all_module_settings(guild_id: str, module_name: str) -> Dict[str, 
     
     return result
 
+async def get_all_settings(guild_id: str) -> Dict[str, Any]:
+    """Получает все настройки гильдии из БД"""
+    result = {}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT key, value FROM settings WHERE guild_id = ?",
+                (str(guild_id),)
+            ) as cursor:
+                async for row in cursor:
+                    try:
+                        result[row[0]] = json.loads(row[1])
+                    except Exception:
+                        result[row[0]] = row[1]
+    except Exception as e:
+        logger.error(f"Ошибка получения настроек гильдии {guild_id}: {e}")
+    return result
+
+
 async def migrate_data():
     """Мигрирует данные из JSON файлов в SQLite"""
     try:

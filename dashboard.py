@@ -11,6 +11,22 @@ import json
 from typing import Dict, Any, List, Optional, Union
 import traceback
 
+from db import get_setting, set_setting, get_all_settings
+
+# Описание всех настраиваемых параметров бота
+SETTINGS_META: Dict[str, Dict[str, Any]] = {
+    "mod_log_channel":        {"type": "int",  "default": None,  "desc": "ID канала для логов модерации"},
+    "auto_moderation":        {"type": "bool", "default": True,  "desc": "Автоматическая фильтрация сообщений"},
+    "xp_per_message":         {"type": "int",  "default": 5,     "desc": "XP за одно сообщение"},
+    "xp_per_minute_voice":    {"type": "int",  "default": 1,     "desc": "XP за минуту в голосовом канале"},
+    "level_up_notification":  {"type": "bool", "default": True,  "desc": "Уведомление о повышении уровня"},
+    "ignore_bot_channels":    {"type": "bool", "default": True,  "desc": "Не начислять XP в бот-каналах"},
+    "auto_disconnect":        {"type": "bool", "default": True,  "desc": "Авто-отключение музыки при пустой очереди"},
+    "music_timeout":          {"type": "int",  "default": 180,   "desc": "Таймаут авто-отключения музыки (секунды)"},
+    "volume":                 {"type": "int",  "default": 50,    "desc": "Громкость музыки (0–100)"},
+}
+
+
 class DashboardCog(commands.Cog):
     """Ког для панели управления и модерации"""
     
@@ -351,70 +367,72 @@ class DashboardCog(commands.Cog):
     
     @commands.command(name="settings")
     @commands.has_permissions(administrator=True)
-    async def dashboard_settings(self, ctx, setting: str = None, value: str = None):
-        """Команда для управления настройками панели управления"""
-        # Проверяем, включен ли модуль
-        if self.module and not self.module.enabled:
-            await ctx.send("❌ Модуль панели управления отключен.")
-            return
-        
-        if not setting:
-            # Показываем текущие настройки панели управления
-            if self.module:
-                settings = self.module.get_settings()
-                
-                # Создаем эмбед с настройками
-                embed = discord.Embed(
-                    title="⚙️ Настройки панели управления",
-                    color=discord.Color.blue()
-                )
-                
-                # Добавляем информацию о настройках
-                for key, val in settings.items():
-                    if key not in ["enabled", "name", "description", "forbidden_words", "forbidden_words_count"]:
-                        embed.add_field(name=key, value=str(val), inline=True)
-                
-                # Добавляем информацию о запрещенных словах
+    async def dashboard_settings(self, ctx, setting: str = None, *, value: str = None):
+        """Управление настройками бота на этом сервере"""
+        guild_id = str(ctx.guild.id)
+
+        if setting is None:
+            # Показываем все настройки с текущими значениями из БД
+            db_settings = await get_all_settings(guild_id)
+
+            embed = discord.Embed(
+                title="⚙️ Настройки сервера",
+                description=(
+                    "Просмотр: `!settings <ключ>`\n"
+                    "Изменение: `!settings <ключ> <значение>`"
+                ),
+                color=discord.Color.blue(),
+            )
+
+            for key, meta in SETTINGS_META.items():
+                current = db_settings.get(key, meta["default"])
                 embed.add_field(
-                    name="Запрещенные слова",
-                    value=f"Всего: {len(self.module.forbidden_words)}",
-                    inline=False
+                    name=f"`{key}`",
+                    value=f"{meta['desc']}\nЗначение: **{current}**",
+                    inline=False,
                 )
-                
-                await ctx.send(embed=embed)
-                return
-        
-        # Проверяем, существует ли настройка
-        if self.module and setting not in self.module.settings:
-            await ctx.send(f"❌ Настройка `{setting}` не найдена.")
+
+            await ctx.send(embed=embed)
             return
-        
-        # Изменяем настройку
-        if not value:
-            # Если значение не указано, показываем текущее значение
-            await ctx.send(f"📝 Текущее значение `{setting}`: `{self.module.settings[setting]}`")
-        else:
-            # Преобразуем значение в нужный тип
-            if isinstance(self.module.settings[setting], bool):
-                value = value.lower() in ["true", "1", "yes", "y", "да"]
-            elif isinstance(self.module.settings[setting], int):
-                try:
-                    value = int(value)
-                except ValueError:
-                    await ctx.send(f"❌ Значение `{value}` должно быть целым числом.")
-                    return
-            elif isinstance(self.module.settings[setting], float):
-                try:
-                    value = float(value)
-                except ValueError:
-                    await ctx.send(f"❌ Значение `{value}` должно быть числом.")
-                    return
-            
-            # Обновляем настройку
-            new_settings = {setting: value}
-            await self.module.update_settings(new_settings)
-            
-            await ctx.send(f"✅ Настройка `{setting}` изменена на `{value}`.")
+
+        # Проверяем, является ли ключ известным
+        if setting not in SETTINGS_META:
+            known = ", ".join(f"`{k}`" for k in SETTINGS_META)
+            await ctx.send(
+                f"❌ Неизвестная настройка `{setting}`.\n**Доступные ключи:** {known}"
+            )
+            return
+
+        meta = SETTINGS_META[setting]
+
+        if value is None:
+            # Показываем текущее значение конкретной настройки
+            current = await get_setting(guild_id, setting, meta["default"])
+            embed = discord.Embed(
+                title=f"⚙️ `{setting}`",
+                color=discord.Color.blue(),
+            )
+            embed.add_field(name="Описание", value=meta["desc"], inline=False)
+            embed.add_field(name="Текущее значение", value=str(current), inline=True)
+            embed.add_field(name="Тип", value=meta["type"], inline=True)
+            embed.set_footer(text=f"Изменить: !settings {setting} <значение>")
+            await ctx.send(embed=embed)
+            return
+
+        # Преобразуем строку в нужный тип
+        try:
+            if meta["type"] == "bool":
+                parsed = value.lower() in ("true", "1", "yes", "да", "вкл", "on")
+            elif meta["type"] == "int":
+                parsed = int(value)
+            else:
+                parsed = value
+        except ValueError:
+            await ctx.send(f"❌ Неверный тип значения. Ожидается `{meta['type']}`.")
+            return
+
+        await set_setting(guild_id, setting, parsed)
+        await ctx.send(f"✅ Настройка `{setting}` установлена на **{parsed}**.")
     
     @commands.command(name="invite")
     async def invite(self, ctx):
