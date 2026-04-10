@@ -179,3 +179,36 @@ class LoggingCog(commands.Cog):
         
         # Пользователь присоединился к голосовому каналу
         if before.channel is None and after.channel is not None:
+            embed = discord.Embed(
+                title="🔊 Вход в голосовой канал",
+                description=f"{member.mention} подключился к **{after.channel.name}**",
+                color=discord.Color.green(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
+            if self.module:
+                await self.module.log_to_channel(embed=embed)
+
+        # Пользователь вышел из голосового канала
+        elif before.channel is not None and after.channel is None:
+            embed = discord.Embed(
+                title="🔇 Выход из голосового канала",
+                description=f"{member.mention} отключился от **{before.channel.name}**",
+                color=discord.Color.red(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
+            if self.module:
+                await self.module.log_to_channel(embed=embed)
+
+        # Пользователь сменил голосовой канал
+        elif before.channel != after.channel:
+            embed = discord.Embed(
+                title="🔄 Смена голосового канала",
+                description=f"{member.mention} перешёл из **{before.channel.name}** в **{after.channel.name}**",
+                color=discord.Color.blue(),
+                timestamp=datetime.datetime.utcnow()
+            )
+            embed.set_author(name=f"{member} ({member.id})", icon_url=member.display_avatar.url)
+            if self.module:
+                await self.module.log_to_channel(embed=embed)
